@@ -1,6 +1,8 @@
 package com.example.agent.subagents;
 
-import com.example.agent.core.SubAgentResult;
+import com.example.agent.dto.CodeSnippet;
+import com.example.agent.dto.DependencyInfo;
+import com.example.agent.dto.ResearchResult;
 import org.springaicommunity.agent.tools.FileSystemTools;
 import org.springaicommunity.agent.tools.GrepTool;
 import org.springaicommunity.agent.tools.ListDirectoryTool;
@@ -8,102 +10,119 @@ import org.springaicommunity.agent.tools.ShellTools;
 import org.springframework.stereotype.Component;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
  * 代码研究子代理（第一阶段）。
  * <p>
- * 负责对目标项目进行全面的代码调研和信息收集，包括：
- * <ul>
- *   <li><b>目录结构</b> - 列出项目文件树（深度限制 2 层）</li>
- *   <li><b>内容搜索</b> - 根据需求关键词正则匹配相关代码</li>
- *   <li><b>依赖分析</b> - 读取 pom.xml 了解技术栈</li>
- *   <li><b>Git 状态</b> - 检查版本控制状态</li>
- * </ul>
+ * 负责对目标项目进行全面的代码调研和信息收集，返回结构化的 {@link ResearchResult}。
  * </p>
- * <p>
- * 本阶段是后续方案规划和测试验证的基础数据来源。
- * </p>
- *
- * @author FanMang776
- * @see SolutionPlannerSubAgent
- * @see TestVerifierSubAgent
  */
 @Component
 public class CodeResearchSubAgent {
 
-    /** 代码内容搜索工具（基于 ripgrep）*/
     private final GrepTool grepTool = GrepTool.builder().build();
-
-    /** 文件读写工具 */
     private final FileSystemTools fileSystemTools = FileSystemTools.builder().build();
-
-    /** 目录列出工具 */
     private final ListDirectoryTool listDirectoryTool = ListDirectoryTool.builder().build();
-
-    /** Shell 命令执行工具 */
     private final ShellTools shellTools = ShellTools.builder().build();
 
     /**
      * 执行代码研究分析。
-     * <p>
-     * 收集以下信息并组装成结构化的研究报告：
-     * <ol>
-     *   <li>项目目录结构（最多 200 个文件，递归深度 2）</li>
-     *   <li>与需求相关的代码片段（最大返回 50 条匹配）</li>
-     *   <li>pom.xml 内容片段（了解依赖和技术栈）</li>
-     *   <li>Git 仓库状态（分支名、变更文件等）</li>
-     * </ol>
-     * </p>
      *
      * @param requirement 用户的研发需求描述
      * @param projectPath 目标项目的绝对路径
-     * @return 包含完整研究报告的 {@link SubAgentResult}
+     * @return 结构化的研究结果 {@link ResearchResult}
      */
-    public SubAgentResult run(String requirement, Path projectPath) {
+    public ResearchResult run(String requirement, Path projectPath) {
         String path = projectPath.toAbsolutePath().toString();
 
-        // 1. 列出项目目录结构（深度 2，上限 200 文件）
+        // 1. 列出项目目录结构
         String files = listDirectoryTool.listDirectory(path, 2, 200);
 
-        // 2. 使用正则搜索与需求相关的代码内容
-        String grepPattern = Pattern.quote(requirement); // 对特殊字符转义
-        String grep = grepTool.grep(grepPattern, path, "**/*", GrepTool.OutputMode.content, 50, 2, 300, true, false, "", 10, 200, false);
+        // 2. 搜索代码内容
+        String grepPattern = Pattern.quote(requirement);
+        String grepOutput = grepTool.grep(grepPattern, path, "**/*", GrepTool.OutputMode.content,
+                50, 2, 300, true, false, "", 10, 200, false);
+        List<CodeSnippet> snippets = parseSnippets(grepOutput);
 
-        // 3. 读取 pom.xml 了解项目依赖
+        // 3. 读取 pom.xml
         String pom = fileSystemTools.read(projectPath.resolve("pom.xml").toString(), 1, 200);
+        DependencyInfo depInfo = parseDependencyInfo(pom);
 
-        // 4. 获取 Git 版本控制状态
+        // 4. Git 状态
         String rawShell = shellTools.bash("git status --short --branch", 10000L, path, false);
-        String shell = normalizeShellStatus(rawShell);
+        String gitStatus = normalizeShellStatus(rawShell);
 
-        // 组装详细报告
-        String details = """
-                [Directory]
-                %s
-
-                [Search]
-                %s
-
-                [pom.xml excerpt]
-                %s
-
-                [Git status]
-                %s
-                """.formatted(files, grep, pom, shell);
-
-        return new SubAgentResult("CodeResearch", "Completed repository scanning and context collection", details);
+        return new ResearchResult(files, snippets, depInfo, gitStatus);
     }
 
-    /**
-     * 规范化 Shell 命令的输出结果。
-     * <p>
-     * 处理非 Git 仓库的特殊情况，给出友好的提示信息。
-     * </p>
-     *
-     * @param raw Shell 命令原始输出
-     * @return 规格化后的状态文本
-     */
+    /** 从 grep 输出解析为 CodeSnippet 列表（格式：path:line:content + 上下文） */
+    private List<CodeSnippet> parseSnippets(String grepOutput) {
+        if (grepOutput == null || grepOutput.isBlank()) {
+            return Collections.emptyList();
+        }
+        List<CodeSnippet> result = new ArrayList<>();
+        String[] lines = grepOutput.split("\n");
+        for (String line : lines) {
+            Matcher m = Pattern.compile("^([^:]+):(\\d+):(.*)").matcher(line);
+            if (m.find()) {
+                result.add(new CodeSnippet(
+                        m.group(1),
+                        Integer.parseInt(m.group(2)),
+                        m.group(3),
+                        ""));
+            }
+        }
+        return result;
+    }
+
+    /** 从 pom.xml 内容片段提取依赖信息 */
+    private DependencyInfo parseDependencyInfo(String pom) {
+        if (pom == null || pom.isBlank()) {
+            return new DependencyInfo("", "", "", Collections.emptyList());
+        }
+        String groupId = extractXmlTag(pom, "groupId", 0);
+        String artifactId = extractXmlTag(pom, "artifactId", 0);
+        String javaVersion = extractJavaVersion(pom);
+        List<String> deps = extractDependencies(pom);
+        return new DependencyInfo(groupId, artifactId, javaVersion, deps);
+    }
+
+    private String extractXmlTag(String xml, String tag, int occurrence) {
+        Pattern p = Pattern.compile("<" + tag + ">([^<]+)</" + tag + ">");
+        Matcher m = p.matcher(xml);
+        for (int i = 0; i <= occurrence && m.find(); i++) {
+            if (i == occurrence) return m.group(1);
+        }
+        return "";
+    }
+
+    private String extractJavaVersion(String pom) {
+        Matcher m = Pattern.compile("<java\\.version>([^<]+)</java\\.version>").matcher(pom);
+        return m.find() ? m.group(1) : "17+";
+    }
+
+    private List<String> extractDependencies(String pom) {
+        List<String> deps = new ArrayList<>();
+        // 匹配 <artifactId>xxx</artifactId> 但排除 parent / project 自身的
+        Matcher m = Pattern.compile("<artifactId>([^<]+)</artifactId>").matcher(pom);
+        while (m.find()) {
+            String art = m.group(1);
+            if (!art.equals(artifactIdFromPom(pom)) && !art.equals("spring-boot-starter-parent")) {
+                deps.add(art);
+            }
+        }
+        return deps.size() > 10 ? deps.subList(0, 10) : deps;
+    }
+
+    private String artifactIdFromPom(String pom) {
+        return extractXmlTag(pom, "artifactId", 1);
+    }
+
     private String normalizeShellStatus(String raw) {
         String lower = raw == null ? "" : raw.toLowerCase();
         if (lower.contains("not a git repository")) {
@@ -112,6 +131,6 @@ public class CodeResearchSubAgent {
                     Suggestion: run `git init` in the project root if version control is expected.
                     """;
         }
-        return raw;
+        return raw != null ? raw : "";
     }
 }

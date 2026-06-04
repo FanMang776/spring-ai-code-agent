@@ -15,3 +15,6 @@ Thumbs.db
 
 # Env
 application-local.yml
+
+# test
+test
