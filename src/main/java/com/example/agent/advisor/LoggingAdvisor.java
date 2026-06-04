@@ -6,6 +6,7 @@ import org.springframework.ai.chat.client.ChatClientRequest;
 import org.springframework.ai.chat.client.ChatClientResponse;
 import org.springframework.ai.chat.client.advisor.api.AdvisorChain;
 import org.springframework.ai.chat.client.advisor.api.BaseAdvisor;
+import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.core.Ordered;
 import org.springframework.stereotype.Component;
 
@@ -38,8 +39,19 @@ public class LoggingAdvisor implements BaseAdvisor {
     @Override
     public ChatClientResponse after(ChatClientResponse response, AdvisorChain chain) {
         String traceId = (String) response.context().get("traceId");
-        Object model = response.chatResponse().getMetadata().get("model");
-        log.debug("[{}] Response received. model={}", traceId, model);
+        var chatResponse = response.chatResponse();
+
+        // 从 ChatResponseMetadata 获取 token 用量（标准 API）
+        var metadata = chatResponse.getMetadata();
+        Usage usage = metadata.getUsage();
+        if (usage != null) {
+            log.info("[{}] Token usage: prompt={}, completion={}, total={}",
+                    traceId, usage.getPromptTokens(), usage.getCompletionTokens(), usage.getTotalTokens());
+        } else {
+            log.info("[{}] No token usage available.", traceId);
+        }
+
+        log.debug("[{}] Response received.", traceId);
         return response;
     }
 
